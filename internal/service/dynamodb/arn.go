@@ -37,3 +37,15 @@ func tableNameFromARN(rn string) (string, error) {
 
 	return strings.TrimPrefix(parsedARN.Resource, "table/"), nil
 }
+
+// isRecoveryPointARN reports whether rn is an AWS Backup recovery point ARN.
+// Tables backed up by AWS Backup with advanced DynamoDB backup enabled get these
+// instead of DynamoDB backup ARNs, and only AWS Backup can restore them.
+func isRecoveryPointARN(rn string) bool {
+	parsedARN, err := arn.Parse(rn)
+	if err != nil {
+		return false
+	}
+
+	return parsedARN.Service == "backup" && strings.HasPrefix(parsedARN.Resource, "recovery-point:")
+}

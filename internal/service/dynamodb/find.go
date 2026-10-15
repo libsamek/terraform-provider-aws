@@ -7,6 +7,8 @@ import (
 	"context"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/backup"
+	backuptypes "github.com/aws/aws-sdk-go-v2/service/backup/types"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	awstypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/hashicorp/terraform-provider-aws/internal/errs"
@@ -127,4 +129,28 @@ func findImportByARN(ctx context.Context, conn *dynamodb.Client, arn string) (*a
 	}
 
 	return output.ImportTableDescription, nil
+}
+
+func findRestoreJobByID(ctx context.Context, conn *backup.Client, id string) (*backup.DescribeRestoreJobOutput, error) {
+	input := backup.DescribeRestoreJobInput{
+		RestoreJobId: aws.String(id),
+	}
+
+	output, err := conn.DescribeRestoreJob(ctx, &input)
+
+	if errs.IsA[*backuptypes.ResourceNotFoundException](err) {
+		return nil, &retry.NotFoundError{
+			LastError: err,
+		}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	if output == nil {
+		return nil, tfresource.NewEmptyResultError()
+	}
+
+	return output, nil
 }

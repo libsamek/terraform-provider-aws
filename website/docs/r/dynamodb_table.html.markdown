@@ -332,6 +332,20 @@ resource "aws_dynamodb_tag" "example" {
 }
 ```
 
+### Restoring from an AWS Backup Recovery Point
+
+Tables backed up by AWS Backup with [advanced DynamoDB backup](https://docs.aws.amazon.com/aws-backup/latest/devguide/advanced-ddb-backup.html) enabled have AWS Backup recovery point ARNs instead of DynamoDB backup ARNs. The provider restores these through AWS Backup, which assumes the IAM role in `restore_backup_iam_role_arn`.
+
+~> **Note:** AWS Backup restores the table's key schema, indexes, billing mode, and capacity from the recovery point. The `global_secondary_index`, `local_secondary_index`, `billing_mode`, `read_capacity`, `write_capacity`, and `on_demand_throughput` arguments are not applied during the restore, so set them to match the backup.
+
+```terraform
+resource "aws_dynamodb_table" "example" {
+  name                        = "example-restored"
+  restore_backup_arn          = "arn:aws:backup:us-west-2:123456789012:recovery-point:1EB3B5E7-9EB0-435A-A80B-108B488B0D45"
+  restore_backup_iam_role_arn = "arn:aws:iam::123456789012:role/example-backup-restore"
+}
+```
+
 ## Argument Reference
 
 The following arguments are required:
@@ -354,7 +368,8 @@ The following arguments are optional:
 * `range_key` - (Optional, Forces new resource) Attribute to use as the range (sort) key. Must also be defined as an `attribute`, see below.
 * `read_capacity` - (Optional) Number of read units for this table. If the `billing_mode` is `PROVISIONED`, this field is required.
 * `replica` - (Optional) Configuration block(s) with [DynamoDB Global Tables V2 (version 2019.11.21)](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/globaltables.V2.html) replication configurations. See below.
-* `restore_backup_arn` - (Optional) ARN of backup to restore.
+* `restore_backup_arn` - (Optional) ARN of the backup to restore. Either a DynamoDB backup ARN (`arn:aws:dynamodb:<region>:<account-id>:table/<table-name>/backup/<backup-id>`) or an AWS Backup recovery point ARN (`arn:aws:backup:<region>:<account-id>:recovery-point:<recovery-point-id>`). See [Restoring from an AWS Backup Recovery Point](#restoring-from-an-aws-backup-recovery-point).
+* `restore_backup_iam_role_arn` - (Optional) ARN of the IAM role that AWS Backup assumes to restore the table. Used only when `restore_backup_arn` is an AWS Backup recovery point ARN. Requires `restore_backup_arn`.
 * `restore_date_time` - (Optional) Time of the point-in-time recovery point to restore.
 * `restore_source_name` - (Optional) Name of the table to restore. Must match the name of an existing table.
 * `restore_source_table_arn` - (Optional) ARN of the source table to restore. Must be supplied for cross-region restores.

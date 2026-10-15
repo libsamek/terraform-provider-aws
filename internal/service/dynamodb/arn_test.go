@@ -56,3 +56,43 @@ func TestARNForNewRegion(t *testing.T) {
 		})
 	}
 }
+
+func TestIsRecoveryPointARN(t *testing.T) {
+	t.Parallel()
+
+	testCases := map[string]struct {
+		ARN      string
+		Expected bool
+	}{
+		"recovery point": {
+			ARN:      "arn:aws:backup:us-west-2:123456789012:recovery-point:1EB3B5E7-9EB0-435A-A80B-108B488B0D45", //lintignore:AWSAT003,AWSAT005
+			Expected: true,
+		},
+		"recovery point other partition": {
+			ARN:      "arn:aws-us-gov:backup:us-gov-west-1:123456789012:recovery-point:1EB3B5E7-9EB0-435A-A80B-108B488B0D45", //lintignore:AWSAT003,AWSAT005
+			Expected: true,
+		},
+		"DynamoDB backup": {
+			ARN:      "arn:aws:dynamodb:us-west-2:123456789012:table/test/backup/01234567890123-abcdefgh", //lintignore:AWSAT003,AWSAT005
+			Expected: false,
+		},
+		"backup vault": {
+			ARN:      "arn:aws:backup:us-west-2:123456789012:backup-vault:test", //lintignore:AWSAT003,AWSAT005
+			Expected: false,
+		},
+		"not an ARN": {
+			ARN:      "recovery-point:1EB3B5E7-9EB0-435A-A80B-108B488B0D45",
+			Expected: false,
+		},
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			if got, want := tfdynamodb.IsRecoveryPointARN(testCase.ARN), testCase.Expected; got != want {
+				t.Errorf("IsRecoveryPointARN(%q) = %t, want %t", testCase.ARN, got, want)
+			}
+		})
+	}
+}

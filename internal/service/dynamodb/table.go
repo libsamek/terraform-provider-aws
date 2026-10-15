@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/backup"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	awstypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/hashicorp/aws-sdk-go-base/v2/tfawserr"
@@ -474,6 +475,12 @@ func resourceTable() *schema.Resource {
 					ValidateFunc:  verify.ValidARN,
 					ConflictsWith: []string{"import_table", "restore_source_name", "restore_source_table_arn"},
 				},
+				"restore_backup_iam_role_arn": {
+					Type:         schema.TypeString,
+					Optional:     true,
+					ValidateFunc: verify.ValidARN,
+					RequiredWith: []string{"restore_backup_arn"},
+				},
 				"restore_source_table_arn": {
 					Type:          schema.TypeString,
 					Optional:      true,
@@ -733,6 +740,35 @@ func resourceTableCreate(ctx context.Context, d *schema.ResourceData, meta any) 
 
 		if err != nil {
 			return create.AppendDiagError(diags, names.DynamoDB, create.ErrActionCreating, resNameTable, tableName, err)
+		}
+	} else if recoveryPointARN, ok := d.GetOk("restore_backup_arn"); ok && isRecoveryPointARN(recoveryPointARN.(string)) {
+		// DynamoDB's RestoreTableFromBackup rejects AWS Backup recovery point ARNs, so restore through AWS Backup.
+		// AWS Backup restores the table as it was backed up, so index and capacity overrides can't be applied here.
+		backupConn := meta.(*conns.AWSClient).BackupClient(ctx)
+		input := backup.StartRestoreJobInput{
+			Metadata:         expandRecoveryPointRestoreMetadata(tableName, d.Get("server_side_encryption").([]any)),
+			RecoveryPointArn: aws.String(recoveryPointARN.(string)),
+			ResourceType:     aws.String("DynamoDB"),
+		}
+
+		if v, ok := d.GetOk("restore_backup_iam_role_arn"); ok {
+			input.IamRoleArn = aws.String(v.(string))
+		}
+
+		output, err := backupConn.StartRestoreJob(ctx, &input)
+
+		if err != nil {
+			return create.AppendDiagError(diags, names.DynamoDB, create.ErrActionCreating, resNameTable, tableName, err)
+		}
+
+		restoreJobID := aws.ToString(output.RestoreJobId)
+		if _, err := waitRestoreJobCompleted(ctx, backupConn, restoreJobID, d.Timeout(schema.TimeoutCreate)); err != nil {
+			// A restore job that is still running can go on to create the table, so track the table instead of orphaning it.
+			// Don't track it when the job failed: the table may be another one that already had this name.
+			if retry.TimedOut(err) {
+				d.SetId(tableName)
+			}
+			return create.AppendDiagError(diags, names.DynamoDB, create.ErrActionWaitingForCreation, resNameTable, tableName, fmt.Errorf("AWS Backup restore job (%s): %w", restoreJobID, err))
 		}
 	} else if backupARN, ok := d.GetOk("restore_backup_arn"); ok {
 		input := &dynamodb.RestoreTableFromBackupInput{
@@ -3191,6 +3227,34 @@ func expandEncryptAtRestOptions(vOptions []any) *awstypes.SSESpecification {
 	options.Enabled = aws.Bool(enabled)
 
 	return options
+}
+
+// expandRecoveryPointRestoreMetadata returns the AWS Backup StartRestoreJob metadata for a DynamoDB table.
+// See https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-dynamodb.html#ddb-restore-cli.
+func expandRecoveryPointRestoreMetadata(tableName string, tfList []any) map[string]string {
+	metadata := map[string]string{
+		"targetTableName": tableName,
+	}
+
+	if len(tfList) == 0 || tfList[0] == nil {
+		return metadata
+	}
+
+	tfMap := tfList[0].(map[string]any)
+
+	if !tfMap[names.AttrEnabled].(bool) {
+		// AWS owned key.
+		metadata["encryptionType"] = "Default"
+		return metadata
+	}
+
+	// AWS managed key, unless a customer managed key is specified.
+	metadata["encryptionType"] = "KMS"
+	if v, ok := tfMap[names.AttrKMSKeyARN].(string); ok && v != "" {
+		metadata["kmsMasterKeyArn"] = v
+	}
+
+	return metadata
 }
 
 func expandInputFormatOptions(data []any) *awstypes.InputFormatOptions {
