@@ -8301,7 +8301,7 @@ func TestAccDynamoDBTable_restoreBackupARNRecoveryPoint(t *testing.T) {
 	acctest.ParallelTest(ctx, t, resource.TestCase{
 		PreCheck: func() {
 			acctest.PreCheck(ctx, t)
-			testAccPreCheckAdvancedDynamoDBBackup(ctx, t)
+			testAccPreCheckAdvancedBackup(ctx, t)
 		},
 		ErrorCheck:               acctest.ErrorCheck(t, names.DynamoDBServiceID, names.BackupServiceID),
 		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
@@ -9197,7 +9197,7 @@ func testAccCheckTableBackupJobRecoveryPoint(ctx context.Context, t *testing.T, 
 	}
 }
 
-func testAccPreCheckAdvancedDynamoDBBackup(ctx context.Context, t *testing.T) {
+func testAccPreCheckAdvancedBackup(ctx context.Context, t *testing.T) {
 	conn := acctest.ProviderMeta(ctx, t).BackupClient(ctx)
 
 	input := backup.DescribeRegionSettingsInput{}
