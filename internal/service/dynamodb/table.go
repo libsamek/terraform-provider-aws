@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/backup"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	awstypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/hashicorp/aws-sdk-go-base/v2/tfawserr"
@@ -37,6 +36,7 @@ import (
 	tfmaps "github.com/hashicorp/terraform-provider-aws/internal/maps"
 	"github.com/hashicorp/terraform-provider-aws/internal/retry"
 	"github.com/hashicorp/terraform-provider-aws/internal/sdkv2"
+	tfbackup "github.com/hashicorp/terraform-provider-aws/internal/service/backup"
 	"github.com/hashicorp/terraform-provider-aws/internal/service/kms"
 	tfsync "github.com/hashicorp/terraform-provider-aws/internal/sync"
 	tftags "github.com/hashicorp/terraform-provider-aws/internal/tags"
@@ -745,24 +745,14 @@ func resourceTableCreate(ctx context.Context, d *schema.ResourceData, meta any) 
 		// DynamoDB's RestoreTableFromBackup rejects AWS Backup recovery point ARNs, so restore through AWS Backup.
 		// AWS Backup restores the table as it was backed up, so index and capacity overrides can't be applied here.
 		backupConn := meta.(*conns.AWSClient).BackupClient(ctx)
-		input := backup.StartRestoreJobInput{
-			Metadata:         expandRecoveryPointRestoreMetadata(tableName, d.Get("server_side_encryption").([]any)),
-			RecoveryPointArn: aws.String(recoveryPointARN.(string)),
-			ResourceType:     aws.String("DynamoDB"),
-		}
-
-		if v, ok := d.GetOk("restore_backup_iam_role_arn"); ok {
-			input.IamRoleArn = aws.String(v.(string))
-		}
-
-		output, err := backupConn.StartRestoreJob(ctx, &input)
+		metadata := expandRecoveryPointRestoreMetadata(tableName, d.Get("server_side_encryption").([]any))
+		restoreJobID, err := tfbackup.StartRestoreJob(ctx, backupConn, recoveryPointARN.(string), "DynamoDB", d.Get("restore_backup_iam_role_arn").(string), metadata)
 
 		if err != nil {
 			return create.AppendDiagError(diags, names.DynamoDB, create.ErrActionCreating, resNameTable, tableName, err)
 		}
 
-		restoreJobID := aws.ToString(output.RestoreJobId)
-		if _, err := waitRestoreJobCompleted(ctx, backupConn, restoreJobID, d.Timeout(schema.TimeoutCreate)); err != nil {
+		if _, err := tfbackup.WaitRestoreJobCompleted(ctx, backupConn, restoreJobID, max(createTableTimeout, d.Timeout(schema.TimeoutCreate))); err != nil {
 			// A restore job that is still running can go on to create the table, so track the table instead of orphaning it.
 			// Don't track it when the job failed: the table may be another one that already had this name.
 			if retry.TimedOut(err) {

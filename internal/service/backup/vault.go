@@ -320,3 +320,84 @@ func waitRecoveryPointDeleted(ctx context.Context, conn *backup.Client, backupVa
 
 	return nil, err
 }
+
+// startRestoreJob starts a job that restores a recovery point and returns the job's ID.
+// iamRoleARN is optional.
+func startRestoreJob(ctx context.Context, conn *backup.Client, recoveryPointARN, resourceType, iamRoleARN string, metadata map[string]string) (string, error) {
+	input := backup.StartRestoreJobInput{
+		Metadata:         metadata,
+		RecoveryPointArn: aws.String(recoveryPointARN),
+		ResourceType:     aws.String(resourceType),
+	}
+
+	if iamRoleARN != "" {
+		input.IamRoleArn = aws.String(iamRoleARN)
+	}
+
+	output, err := conn.StartRestoreJob(ctx, &input)
+
+	if err != nil {
+		return "", err
+	}
+
+	return aws.ToString(output.RestoreJobId), nil
+}
+
+func findRestoreJobByID(ctx context.Context, conn *backup.Client, id string) (*backup.DescribeRestoreJobOutput, error) {
+	input := backup.DescribeRestoreJobInput{
+		RestoreJobId: aws.String(id),
+	}
+
+	output, err := conn.DescribeRestoreJob(ctx, &input)
+
+	if errs.IsA[*awstypes.ResourceNotFoundException](err) {
+		return nil, &retry.NotFoundError{
+			LastError: err,
+		}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	if output == nil {
+		return nil, tfresource.NewEmptyResultError()
+	}
+
+	return output, nil
+}
+
+func statusRestoreJob(conn *backup.Client, id string) retry.StateRefreshFunc {
+	return func(ctx context.Context) (any, string, error) {
+		output, err := findRestoreJobByID(ctx, conn, id)
+
+		if retry.NotFound(err) {
+			return nil, "", nil
+		}
+
+		if err != nil {
+			return nil, "", err
+		}
+
+		return output, string(output.Status), nil
+	}
+}
+
+func waitRestoreJobCompleted(ctx context.Context, conn *backup.Client, id string, timeout time.Duration) (*backup.DescribeRestoreJobOutput, error) {
+	stateConf := &retry.StateChangeConf{
+		Pending: enum.Slice(awstypes.RestoreJobStatusPending, awstypes.RestoreJobStatusRunning),
+		Target:  enum.Slice(awstypes.RestoreJobStatusCompleted),
+		Refresh: statusRestoreJob(conn, id),
+		Timeout: timeout,
+	}
+
+	outputRaw, err := stateConf.WaitForStateContext(ctx)
+
+	if output, ok := outputRaw.(*backup.DescribeRestoreJobOutput); ok {
+		retry.SetLastError(err, errors.New(aws.ToString(output.StatusMessage)))
+
+		return output, err
+	}
+
+	return nil, err
+}

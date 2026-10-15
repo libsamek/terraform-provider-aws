@@ -7,7 +7,6 @@ import (
 	"context"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/backup"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	awstypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/hashicorp/terraform-provider-aws/internal/retry"
@@ -237,21 +236,5 @@ func statusSSE(conn *dynamodb.Client, tableName string, optFns ...func(*dynamodb
 		}
 
 		return output, string(output.SSEDescription.Status), nil
-	}
-}
-
-func statusRestoreJob(conn *backup.Client, id string) retry.StateRefreshFunc {
-	return func(ctx context.Context) (any, string, error) {
-		output, err := findRestoreJobByID(ctx, conn, id)
-
-		if retry.NotFound(err) {
-			return nil, "", nil
-		}
-
-		if err != nil {
-			return nil, "", err
-		}
-
-		return output, string(output.Status), nil
 	}
 }

@@ -5,12 +5,8 @@ package dynamodb
 
 import (
 	"context"
-	"errors"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/backup"
-	backuptypes "github.com/aws/aws-sdk-go-v2/service/backup/types"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	awstypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/hashicorp/terraform-provider-aws/internal/enum"
@@ -91,25 +87,6 @@ func waitImportComplete(ctx context.Context, conn *dynamodb.Client, importARN st
 	outputRaw, err := stateConf.WaitForStateContext(ctx)
 
 	if output, ok := outputRaw.(*awstypes.ImportTableDescription); ok {
-		return output, err
-	}
-
-	return nil, err
-}
-
-func waitRestoreJobCompleted(ctx context.Context, conn *backup.Client, id string, timeout time.Duration) (*backup.DescribeRestoreJobOutput, error) {
-	stateConf := &retry.StateChangeConf{
-		Pending: enum.Slice(backuptypes.RestoreJobStatusPending, backuptypes.RestoreJobStatusRunning),
-		Target:  enum.Slice(backuptypes.RestoreJobStatusCompleted),
-		Refresh: statusRestoreJob(conn, id),
-		Timeout: max(createTableTimeout, timeout),
-	}
-
-	outputRaw, err := stateConf.WaitForStateContext(ctx)
-
-	if output, ok := outputRaw.(*backup.DescribeRestoreJobOutput); ok {
-		retry.SetLastError(err, errors.New(aws.ToString(output.StatusMessage)))
-
 		return output, err
 	}
 
