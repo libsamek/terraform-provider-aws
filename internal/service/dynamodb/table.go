@@ -36,6 +36,7 @@ import (
 	tfmaps "github.com/hashicorp/terraform-provider-aws/internal/maps"
 	"github.com/hashicorp/terraform-provider-aws/internal/retry"
 	"github.com/hashicorp/terraform-provider-aws/internal/sdkv2"
+	tfbackup "github.com/hashicorp/terraform-provider-aws/internal/service/backup"
 	"github.com/hashicorp/terraform-provider-aws/internal/service/kms"
 	tfsync "github.com/hashicorp/terraform-provider-aws/internal/sync"
 	tftags "github.com/hashicorp/terraform-provider-aws/internal/tags"
@@ -474,6 +475,12 @@ func resourceTable() *schema.Resource {
 					ValidateFunc:  verify.ValidARN,
 					ConflictsWith: []string{"import_table", "restore_source_name", "restore_source_table_arn"},
 				},
+				"restore_backup_iam_role_arn": {
+					Type:         schema.TypeString,
+					Optional:     true,
+					ValidateFunc: verify.ValidARN,
+					RequiredWith: []string{"restore_backup_arn"},
+				},
 				"restore_source_table_arn": {
 					Type:          schema.TypeString,
 					Optional:      true,
@@ -733,6 +740,25 @@ func resourceTableCreate(ctx context.Context, d *schema.ResourceData, meta any) 
 
 		if err != nil {
 			return create.AppendDiagError(diags, names.DynamoDB, create.ErrActionCreating, resNameTable, tableName, err)
+		}
+	} else if recoveryPointARN, ok := d.GetOk("restore_backup_arn"); ok && isRecoveryPointARN(recoveryPointARN.(string)) {
+		// DynamoDB's RestoreTableFromBackup rejects AWS Backup recovery point ARNs, so restore through AWS Backup.
+		// AWS Backup restores the table as it was backed up, so index and capacity overrides can't be applied here.
+		backupConn := meta.(*conns.AWSClient).BackupClient(ctx)
+		metadata := expandRecoveryPointRestoreMetadata(tableName, d.Get("server_side_encryption").([]any))
+		restoreJobID, err := tfbackup.StartRestoreJob(ctx, backupConn, recoveryPointARN.(string), "DynamoDB", d.Get("restore_backup_iam_role_arn").(string), metadata)
+
+		if err != nil {
+			return create.AppendDiagError(diags, names.DynamoDB, create.ErrActionCreating, resNameTable, tableName, err)
+		}
+
+		if _, err := tfbackup.WaitRestoreJobCompleted(ctx, backupConn, restoreJobID, max(createTableTimeout, d.Timeout(schema.TimeoutCreate))); err != nil {
+			// A restore job that is still running can go on to create the table, so track the table instead of orphaning it.
+			// Don't track it when the job failed: the table may be another one that already had this name.
+			if retry.TimedOut(err) {
+				d.SetId(tableName)
+			}
+			return create.AppendDiagError(diags, names.DynamoDB, create.ErrActionWaitingForCreation, resNameTable, tableName, fmt.Errorf("AWS Backup restore job (%s): %w", restoreJobID, err))
 		}
 	} else if backupARN, ok := d.GetOk("restore_backup_arn"); ok {
 		input := &dynamodb.RestoreTableFromBackupInput{
@@ -3191,6 +3217,34 @@ func expandEncryptAtRestOptions(vOptions []any) *awstypes.SSESpecification {
 	options.Enabled = aws.Bool(enabled)
 
 	return options
+}
+
+// expandRecoveryPointRestoreMetadata returns the AWS Backup StartRestoreJob metadata for a DynamoDB table.
+// See https://docs.aws.amazon.com/aws-backup/latest/devguide/restoring-dynamodb.html#ddb-restore-cli.
+func expandRecoveryPointRestoreMetadata(tableName string, tfList []any) map[string]string {
+	metadata := map[string]string{
+		"targetTableName": tableName,
+	}
+
+	if len(tfList) == 0 || tfList[0] == nil {
+		return metadata
+	}
+
+	tfMap := tfList[0].(map[string]any)
+
+	if !tfMap[names.AttrEnabled].(bool) {
+		// AWS owned key.
+		metadata["encryptionType"] = "Default"
+		return metadata
+	}
+
+	// AWS managed key, unless a customer managed key is specified.
+	metadata["encryptionType"] = "KMS"
+	if v, ok := tfMap[names.AttrKMSKeyARN].(string); ok && v != "" {
+		metadata["kmsMasterKeyArn"] = v
+	}
+
+	return metadata
 }
 
 func expandInputFormatOptions(data []any) *awstypes.InputFormatOptions {

@@ -14,6 +14,8 @@ import (
 
 	"github.com/YakDriver/regexache"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/backup"
+	backuptypes "github.com/aws/aws-sdk-go-v2/service/backup/types"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	awstypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/google/go-cmp/cmp"
@@ -21,6 +23,7 @@ import (
 	"github.com/hashicorp/aws-sdk-go-base/v2/tfawserr"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-testing/compare"
+	"github.com/hashicorp/terraform-plugin-testing/config"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/knownvalue"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
@@ -30,6 +33,7 @@ import (
 	"github.com/hashicorp/terraform-provider-aws/internal/acctest"
 	tfknownvalue "github.com/hashicorp/terraform-provider-aws/internal/acctest/knownvalue"
 	"github.com/hashicorp/terraform-provider-aws/internal/create"
+	"github.com/hashicorp/terraform-provider-aws/internal/enum"
 	"github.com/hashicorp/terraform-provider-aws/internal/retry"
 	tfdynamodb "github.com/hashicorp/terraform-provider-aws/internal/service/dynamodb"
 	tftags "github.com/hashicorp/terraform-provider-aws/internal/tags"
@@ -1794,6 +1798,73 @@ func normalizeGSIMapValue(v map[string]any) map[string]any {
 	maps.Copy(result, v)
 
 	return result
+}
+
+func TestExpandRecoveryPointRestoreMetadata(t *testing.T) {
+	t.Parallel()
+
+	const tableName = "test"
+	kmsKeyARN := "arn:aws:kms:us-west-2:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab" //lintignore:AWSAT003,AWSAT005
+
+	testCases := map[string]struct {
+		ServerSideEncryption []any
+		Expected             map[string]string
+	}{
+		"no server_side_encryption": {
+			Expected: map[string]string{
+				"targetTableName": tableName,
+			},
+		},
+		"disabled": {
+			ServerSideEncryption: []any{
+				map[string]any{
+					names.AttrEnabled:   false,
+					names.AttrKMSKeyARN: "",
+				},
+			},
+			Expected: map[string]string{
+				"targetTableName": tableName,
+				"encryptionType":  "Default",
+			},
+		},
+		"AWS managed key": {
+			ServerSideEncryption: []any{
+				map[string]any{
+					names.AttrEnabled:   true,
+					names.AttrKMSKeyARN: "",
+				},
+			},
+			Expected: map[string]string{
+				"targetTableName": tableName,
+				"encryptionType":  "KMS",
+			},
+		},
+		"customer managed key": {
+			ServerSideEncryption: []any{
+				map[string]any{
+					names.AttrEnabled:   true,
+					names.AttrKMSKeyARN: kmsKeyARN,
+				},
+			},
+			Expected: map[string]string{
+				"targetTableName": tableName,
+				"encryptionType":  "KMS",
+				"kmsMasterKeyArn": kmsKeyARN,
+			},
+		},
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := tfdynamodb.ExpandRecoveryPointRestoreMetadata(tableName, testCase.ServerSideEncryption)
+
+			if diff := cmp.Diff(testCase.Expected, got); diff != "" {
+				t.Errorf("unexpected diff (+wanted, -got): %s", diff)
+			}
+		})
+	}
 }
 
 func TestCheckIfGSIRecreateAttributesChanged(t *testing.T) {
@@ -8215,6 +8286,46 @@ func TestAccDynamoDBTable_restoreBackupARN(t *testing.T) {
 	})
 }
 
+func TestAccDynamoDBTable_restoreBackupARNRecoveryPoint(t *testing.T) {
+	ctx := acctest.Context(t)
+	if testing.Short() {
+		t.Skip("skipping long-running test in short mode")
+	}
+
+	var conf awstypes.TableDescription
+	resourceName := "aws_dynamodb_table.test_restore"
+	rName := acctest.RandomWithPrefix(t, acctest.ResourcePrefix)
+	// The recovery point only exists after the first step's backup job, so the second step reads its ARN from here.
+	recoveryPointVariables := config.Variables{}
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck: func() {
+			acctest.PreCheck(ctx, t)
+			testAccPreCheckAdvancedBackup(ctx, t)
+		},
+		ErrorCheck:               acctest.ErrorCheck(t, names.DynamoDBServiceID, names.BackupServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckTableDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccTableConfig_restoreBackupARNRecoveryPointBase(rName),
+				Check:  testAccCheckTableBackupJobRecoveryPoint(ctx, t, "aws_dynamodb_table.test", "aws_backup_vault.test", "aws_iam_role.test", recoveryPointVariables),
+			},
+			{
+				Config:          testAccTableConfig_restoreBackupARNRecoveryPoint(rName),
+				ConfigVariables: recoveryPointVariables,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckInitialTableExists(ctx, t, resourceName, &conf),
+					resource.TestCheckResourceAttr(resourceName, names.AttrName, rName+"-restore"),
+					resource.TestCheckResourceAttr(resourceName, "hash_key", "TestTableHashKey"),
+					acctest.MatchResourceAttrRegionalARN(ctx, resourceName, "restore_backup_arn", "backup", regexache.MustCompile(`recovery-point:.+$`)),
+					resource.TestCheckResourceAttrPair(resourceName, "restore_backup_iam_role_arn", "aws_iam_role.test", names.AttrARN),
+				),
+			},
+		},
+	})
+}
+
 func TestAccDynamoDBTable_tableClassInfrequentAccess(t *testing.T) {
 	ctx := acctest.Context(t)
 	var table awstypes.TableDescription
@@ -9017,6 +9128,93 @@ func testAccCheckInitialTableExists(ctx context.Context, t *testing.T, n string,
 
 func testAccCheckTableExists(ctx context.Context, t *testing.T, n string, v *awstypes.TableDescription) resource.TestCheckFunc {
 	return testAccCheckInitialTableExists(ctx, t, n, v)
+}
+
+// testAccCheckTableBackupJobRecoveryPoint runs an AWS Backup on-demand backup of the table
+// and stores the resulting recovery point ARN in vars as "recovery_point_arn".
+func testAccCheckTableBackupJobRecoveryPoint(ctx context.Context, t *testing.T, tableResourceName, vaultResourceName, roleResourceName string, vars config.Variables) resource.TestCheckFunc {
+	return func(s *terraform.State) error {
+		table, ok := s.RootModule().Resources[tableResourceName]
+		if !ok {
+			return fmt.Errorf("Not found: %s", tableResourceName)
+		}
+
+		vault, ok := s.RootModule().Resources[vaultResourceName]
+		if !ok {
+			return fmt.Errorf("Not found: %s", vaultResourceName)
+		}
+
+		role, ok := s.RootModule().Resources[roleResourceName]
+		if !ok {
+			return fmt.Errorf("Not found: %s", roleResourceName)
+		}
+
+		conn := acctest.ProviderMeta(ctx, t).BackupClient(ctx)
+
+		input := backup.StartBackupJobInput{
+			BackupVaultName: aws.String(vault.Primary.ID),
+			IamRoleArn:      aws.String(role.Primary.Attributes[names.AttrARN]),
+			ResourceArn:     aws.String(table.Primary.Attributes[names.AttrARN]),
+		}
+		output, err := conn.StartBackupJob(ctx, &input)
+
+		if err != nil {
+			return fmt.Errorf("starting AWS Backup job: %w", err)
+		}
+
+		backupJobID := aws.ToString(output.BackupJobId)
+		stateConf := &retry.StateChangeConf{
+			Pending: enum.Slice(backuptypes.BackupJobStateCreated, backuptypes.BackupJobStatePending, backuptypes.BackupJobStateRunning),
+			Target:  enum.Slice(backuptypes.BackupJobStateCompleted),
+			Refresh: func(ctx context.Context) (any, string, error) {
+				input := backup.DescribeBackupJobInput{
+					BackupJobId: aws.String(backupJobID),
+				}
+				output, err := conn.DescribeBackupJob(ctx, &input)
+
+				if err != nil {
+					return nil, "", err
+				}
+
+				return output, string(output.State), nil
+			},
+			Timeout: 30 * time.Minute,
+		}
+
+		outputRaw, err := stateConf.WaitForStateContext(ctx)
+
+		if err != nil {
+			if output, ok := outputRaw.(*backup.DescribeBackupJobOutput); ok {
+				retry.SetLastError(err, errors.New(aws.ToString(output.StatusMessage)))
+			}
+
+			return fmt.Errorf("waiting for AWS Backup job (%s) complete: %w", backupJobID, err)
+		}
+
+		vars["recovery_point_arn"] = config.StringVariable(aws.ToString(outputRaw.(*backup.DescribeBackupJobOutput).RecoveryPointArn))
+
+		return nil
+	}
+}
+
+func testAccPreCheckAdvancedBackup(ctx context.Context, t *testing.T) {
+	conn := acctest.ProviderMeta(ctx, t).BackupClient(ctx)
+
+	input := backup.DescribeRegionSettingsInput{}
+	output, err := conn.DescribeRegionSettings(ctx, &input)
+
+	if acctest.PreCheckSkipError(err) {
+		t.Skipf("skipping acceptance testing: %s", err)
+	}
+
+	if err != nil {
+		t.Fatalf("unexpected PreCheck error: %s", err)
+	}
+
+	// Without advanced DynamoDB backup, AWS Backup creates DynamoDB backups, not recovery points.
+	if !output.ResourceTypeManagementPreference["DynamoDB"] {
+		t.Skip("skipping acceptance testing: AWS Backup advanced DynamoDB backup is not enabled")
+	}
 }
 
 func testAccCheckTableNotRecreated(i, j *awstypes.TableDescription) resource.TestCheckFunc {
@@ -13185,6 +13383,71 @@ resource "aws_dynamodb_table" "test_restore" {
   restore_backup_arn = data.aws_dynamodb_backups.test.backup_summaries[0].backup_arn
 }
 `, rName)
+}
+
+func testAccTableConfig_restoreBackupARNRecoveryPointBase(rName string) string {
+	return fmt.Sprintf(`
+data "aws_partition" "current" {}
+
+resource "aws_iam_role" "test" {
+  name = %[1]q
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "backup.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "backup" {
+  role       = aws_iam_role.test.name
+  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup"
+}
+
+resource "aws_iam_role_policy_attachment" "restore" {
+  role       = aws_iam_role.test.name
+  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores"
+}
+
+resource "aws_backup_vault" "test" {
+  name          = %[1]q
+  force_destroy = true
+}
+
+resource "aws_dynamodb_table" "test" {
+  name           = %[1]q
+  read_capacity  = 2
+  write_capacity = 2
+  hash_key       = "TestTableHashKey"
+
+  attribute {
+    name = "TestTableHashKey"
+    type = "S"
+  }
+}
+`, rName)
+}
+
+func testAccTableConfig_restoreBackupARNRecoveryPoint(rName string) string {
+	return acctest.ConfigCompose(testAccTableConfig_restoreBackupARNRecoveryPointBase(rName), fmt.Sprintf(`
+variable "recovery_point_arn" {
+  type     = string
+  nullable = false
+}
+
+resource "aws_dynamodb_table" "test_restore" {
+  name                        = "%[1]s-restore"
+  restore_backup_arn          = var.recovery_point_arn
+  restore_backup_iam_role_arn = aws_iam_role.test.arn
+
+  depends_on = [aws_iam_role_policy_attachment.restore]
+}
+`, rName))
 }
 
 func testAccTableConfig_replica2_NoMultipleRegionProvider(rName string) string {

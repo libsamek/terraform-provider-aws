@@ -18,6 +18,7 @@ var (
 
 	ARNForNewRegion                              = arnForNewRegion
 	ContributorInsightsParseResourceID           = contributorInsightsParseResourceID
+	ExpandRecoveryPointRestoreMetadata           = expandRecoveryPointRestoreMetadata
 	ExpandTableItemAttributes                    = expandTableItemAttributes
 	ExpandTableItemQueryKey                      = expandTableItemQueryKey
 	FindContributorInsightsByTwoPartKey          = findContributorInsightsByTwoPartKey
@@ -30,6 +31,7 @@ var (
 	FindTableItemByTwoPartKey                    = findTableItemByTwoPartKey
 	FindTag                                      = findTag
 	FlattenTableItemAttributes                   = flattenTableItemAttributes
+	IsRecoveryPointARN                           = isRecoveryPointARN
 	ListTags                                     = listTags
 	RegionFromARN                                = regionFromARN
 	ReplicaForRegion                             = replicaForRegion
